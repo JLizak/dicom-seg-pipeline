@@ -1,11 +1,29 @@
 [project]
-name="dcmseg"
+name = "dcmseg"
 version = "0.1.0"
 requires-python = ">=3.11"
-dependecies = [
+dependencies = [
 	"pydicom",
 	"numpy",
-	"requests"
+	"requests",
+	"pyyaml",
+]
+
+[project.optional-dependencies]
+# Trening i inferencja. Na laptopie instaluj torch w wersji CPU (patrz README).
+train = [
+	"torch",
+	"monai>=1.4",
+	"nibabel",
+	"einops",       # wymagane przez SwinUNETR
+	"tqdm",
+]
+# Eksport wyników jako DICOM-SEG / DICOM-SR (Faza 3 i 5).
+dicom = [
+	"highdicom",
+]
+dev = [
+	"pytest",
 ]
 
 [build-system]
@@ -14,3 +32,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

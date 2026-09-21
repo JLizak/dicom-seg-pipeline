@@ -1,0 +1,29 @@
+# Kaggle / Colab / RunPod: GPU 16 GB (T4, P100). Zmień ścieżki pod swoje środowisko.
+# Na Kaggle: dane jako Kaggle Dataset → /kaggle/input/..., wyniki → /kaggle/working.
+experiment: segresnet_mamamia
+output_dir: /kaggle/working/experiments
+
+data:
+  datalist: /kaggle/input/mama-mia-preprocessed/datalist.json   # TODO: Twoja ścieżka
+  in_channels: 2
+  spacing: [1.0, 1.0, 1.0]
+  patch_size: [128, 128, 64]
+  samples_per_volume: 2
+  cache_rate: 0.3             # ile zbioru trzymać w RAM — dopasuj do limitu pamięci
+  num_workers: 4
+
+model:
+  name: segresnet
+  out_channels: 2
+  kwargs:
+    init_filters: 16
+
+train:
+  device: auto
+  amp: true                   # mixed precision: ~2x szybciej na T4
+  epochs: 200
+  batch_size: 2
+  lr: 1.0e-3
+  val_every: 5
+  sw_batch_size: 4
+  seed: 0

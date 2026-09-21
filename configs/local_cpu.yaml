@@ -1,0 +1,28 @@
+# Laptop, CPU: szybki test „czy pipeline w ogóle działa” na danych syntetycznych
+# albo na kilku przypadkach. Nie do prawdziwego treningu.
+experiment: segresnet_local_smoke
+output_dir: experiments
+
+data:
+  datalist: data/synthetic/datalist.json
+  in_channels: 2              # = liczba faz DCE w "image" (np. pre + 1. post-contrast)
+  spacing: [1.0, 1.0, 2.0]    # docelowy spacing w mm
+  patch_size: [64, 64, 32]
+  samples_per_volume: 2
+  cache_rate: 1.0
+  num_workers: 0
+
+model:
+  name: segresnet             # segresnet | unet | dynunet | swinunetr
+  out_channels: 2             # tło + guz
+  kwargs:
+    init_filters: 8
+
+train:
+  device: auto
+  amp: false
+  epochs: 20
+  batch_size: 2
+  lr: 3.0e-3
+  val_every: 5
+  seed: 0
