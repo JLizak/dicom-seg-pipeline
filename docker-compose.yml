@@ -1,0 +1,18 @@
+services:
+  orthanc:
+    image: orthancteam/orthanc:latest
+    ports:
+      - "8042:8042"
+      - "4242:4242"
+    volumes:
+      - ./orthanc.json:/etc/orthanc/orthanc.json:ro
+      - orthanc-db:/var/lib/orthanc/db
+  ohif:
+    image: ohif/app:v3.9.2
+    ports:
+      - "3000:80"
+    volumes:
+      - ./ohif/default.conf:/etc/nginx/conf.d/default.conf
+      - ./ohif/app-config.js:/usr/share/nginx/html/app-config.js
+volumes:
+  orthanc-db:

@@ -1,0 +1,14 @@
+{
+	"Name": "PACS-DEV",
+	"DicomAet": "ORTHANC",
+	"DicomServerEnabled": true,
+	"DicomWeb": {
+		"Enable": true,
+		"Root": "/dicom-web/"
+	},
+	"RemoteAccessAllowed": true,
+	"AuthenticationEnabled": true,
+	"RegisteredUsers": {
+		"dev": "dev"
+	}
+}
