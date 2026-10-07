@@ -12,3 +12,4 @@ __pycache__/
 *.pth
 *.nii
 *.nii.gz
+synapse_token.txt
