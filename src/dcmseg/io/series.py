@@ -1,34 +1,20 @@
-"""Seria DICOM → wolumen 3D (Faza 3.1 / 3.2 ścieżka B przewodnika).
+from dcmseg.pacs import OrthancClient
+import highdicom as hd
+import pydicom as pd
 
-Szkielet do samodzielnego uzupełnienia — to jest ta część, która uczy DICOM-a.
-"""
+def read_dcms(series_id: str) -> list[pd.FileDataset]:
+    orthanc = OrthancClient()
+    instances = orthanc.series(series_id)['Instances']
 
-from pathlib import Path
+    dcms_raw = [orthanc.instance_file(instance) for instance in instances]
+    
+    dcms = [pd.dcmread(dcm) for dcm in dcms_raw]
+        
+    return dcms
 
-import numpy as np
-import pydicom
+def make_series(series_id: str):
+    images : list[pd.FileDataset] = read_dcms(series_id)
 
+    vol = hd.get_volume_from_series(images)
 
-def load_series(files: list[Path]) -> tuple[np.ndarray, np.ndarray, list[pydicom.Dataset]]:
-    """Wczytaj instancje jednej serii i złóż je w wolumen.
-
-    Zwraca: (wolumen [z, y, x], macierz affine 4x4 w mm, posortowane datasety).
-    Datasety będą potrzebne później jako `source_images` dla DICOM-SEG.
-    """
-    # TODO: wczytaj pliki pydicom.dcmread
-    # TODO: posortuj przekroje — NIE po nazwie pliku ani InstanceNumber, tylko po rzucie
-    #       ImagePositionPatient na normalną płaszczyzny (iloczyn wektorowy dwóch
-    #       wektorów z ImageOrientationPatient). Dlaczego? Zapisz w journal.md.
-    # TODO: pixel_array * RescaleSlope + RescaleIntercept
-    # TODO: zbuduj affine z PixelSpacing, odstępu między przekrojami i orientacji
-    raise NotImplementedError
-
-
-def select_series(series_datasets: dict[str, pydicom.Dataset]) -> str:
-    """Wybierz SeriesInstanceUID właściwej fazy DCE (np. pre-contrast, 1. post-contrast).
-
-    W Duke opisy serii (SeriesDescription) są różne między pacjentami — sprawdź, jakie
-    reguły są odporne. To samo robi DICOMSeriesSelectorOperator w MONAI Deploy.
-    """
-    # TODO
-    raise NotImplementedError
+    print(vol.spatial_shape)

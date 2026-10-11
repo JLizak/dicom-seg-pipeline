@@ -50,6 +50,14 @@ Faza 7 (splity + DVC + MLflow) → Faza 8 (ewaluacja z nnU-Net i zbiorem zewnęt
 → Faza 9 (rejestr, bramka w CI, shadow) → Faza 11.2 (poprawki radiologa jako etykiety).
 Faza 10 oraz 11.1, 11.3 i 11.4 to rozszerzenia.
 
+**Dwie zasady architektury, które wracają w każdej fazie:**
+- **Jeden kontrakt.** Seria w PACS-ie wchodzi, DICOM-SEG i DICOM-SR w PACS-ie wychodzą.
+  Wszystko pomiędzy (kolejka, worker, model) da się wymienić bez ruszania tego kontraktu.
+- **Dwa tory.** Trening działa offline na przygotowanych wolumenach (zwykle NIfTI),
+  serwowanie działa na DICOM. Łączą je tylko dwie rzeczy: artefakt modelu (wagi +
+  konfiguracja) i wspólny kod preprocessingu. Gdy te tory zaczną się przenikać w kodzie,
+  zatrzymaj się i je rozdziel.
+
 ---
 
 # Część I — Pipeline kliniczny
@@ -181,6 +189,20 @@ ustawić (poczytaj, co robi każdy klucz — nie kopiuj na ślepo):
 }
 ```
 
+Dwie rzeczy zrób od razu tak, jak w prawdziwym wdrożeniu:
+
+- **Sekrety poza repo.** Hasło w `orthanc.json` to tylko punkt startu. Docelowo trzymaj
+  je w pliku `.env` obok `docker-compose.yml` (plik w `.gitignore`, w repo tylko
+  `.env.example` z samymi nazwami zmiennych) i przekaż Orthancowi przez zmienną
+  środowiskową (`ORTHANC__REGISTERED_USERS`). Twój kod czyta te same zmienne
+  (`ORTHANC_URL`, `ORTHANC_USER`, `ORTHANC_PASSWORD`), więc hasło istnieje w jednym
+  miejscu. Pamiętaj, że `os.getenv` sam nie czyta `.env`: zmienne muszą trafić do
+  środowiska procesu (Compose, `source .env` albo `python-dotenv`).
+- **Orthanc na PostgreSQL.** Domyślny SQLite wystarcza, żeby ruszyć. Gdy Fazy 1–2
+  działają, przełącz indeks Orthanca na Postgresa (wtyczka jest w obrazie
+  `orthancteam/orthanc`). Tak stoi Orthanc poza laptopem, a kontener Postgresa i tak
+  wykorzystasz w Fazie 4 (baza zadań) i 7 (MLflow).
+
 ### 1.2 Zdobądź prawdziwe dane
 
 Nie używaj danych szpitalnych do publicznego repo. Do nauki i do publicznej wersji
@@ -288,10 +310,42 @@ seria DICOM  →  wybór właściwej serii (reguły)  →  złożenie w wolumen 
 To dokładnie ten łańcuch, który w realnych ogłoszeniach nazywa się „budowa pipeline'ów
 DICOM”.
 
-### 3.2 Wybór narzędzia — dwie ścieżki, świadomie
+Trzy decyzje podejmij, zanim napiszesz pierwszą linijkę:
 
-**Ścieżka A — MONAI Deploy App SDK (polecam, bo uczy właściwych abstrakcji i pasuje
-do CV).** SDK ma gotowe *operatory*, które składasz w aplikację (graf operatorów):
+- **Jeden typ na wolumen.** Mała struktura (tablica, spacing, origin, orientacja, lista
+  źródłowych datasetów DICOM), którą przekazujesz między modułami. Źródłowe datasety
+  są potrzebne na końcu, żeby SEG mógł się odwołać do właściwych instancji.
+- **Kolejność przekrojów z geometrii.** Sortuj po `ImagePositionPatient` rzutowanym na
+  normalną do płaszczyzny obrazu (iloczyn wektorowy dwóch wektorów z
+  `ImageOrientationPatient`), a nie po `InstanceNumber` ani nazwie pliku.
+- **Które serie są wejściem modelu.** W DCE-MRI każda faza to osobna seria, a model
+  oczekuje ich jako kanałów w ustalonej kolejności. Reguła wyboru i kolejność kanałów
+  mają być w konfiguracji, nie w kodzie.
+
+Kontrakt kroku inferencji trzymaj wąski: dostaje wolumen `[C, Z, Y, X]` ze spacingiem,
+zwraca maskę **w tej samej siatce co wejście**. Resampling do spacingu modelu i jego
+odwrócenie są w środku. Dzięki temu eksport do SEG nie musi nic wiedzieć o modelu.
+
+### 3.2 Wybór narzędzia — rdzeń ręcznie, SDK jako adapter
+
+**Ścieżka B — rdzeń pipeline'u (zrób ją najpierw i na niej oprzyj całość).** Napisz
+łańcuch sam: `pydicom` do wczytania serii → złożenie wolumenu numpy → Twój `torch`
+forward → maska. „Sam” nie znaczy bez bibliotek: złożenie serii w wolumen z poprawną
+geometrią robi za Ciebie `SimpleITK` (`ImageSeriesReader`) albo nowsze wersje
+`highdicom`, a napisanie tego raz ręcznie w `pydicom` to ćwiczenie na 30 linijek,
+nie warunek. Do zapisu DICOM-SEG **nie pisz enkodera od zera** (to pułapka na
+tygodnie) — użyj biblioteki **`highdicom`** (`highdicom.seg.Segmentation`), która robi
+to poprawnie i zgodnie ze standardem. Ta ścieżka boli, ale po niej naprawdę rozumiesz,
+co dzieje się z geometrią i referencjami, a Fazy 4–11 (kolejka, worker, rejestr, shadow)
+i tak budujesz na własnym kodzie.
+
+**MONAI Bundle — format modelu, niezależnie od ścieżki.** Bundle to część MONAI core,
+a nie Deploy SDK: katalog z wagami, konfiguracją transformacji i metadanymi. Pakuj w
+niego model od początku. Jest jednym źródłem preprocessingu dla treningu i inferencji
+(patrz ramka o train/serve skew w 7.2) i to jego wersje trafią do rejestru w Fazie 9.
+
+**Ścieżka A — MONAI Deploy App SDK jako opcjonalny adapter.** SDK ma gotowe *operatory*,
+które składasz w aplikację (graf operatorów):
 
 - `DICOMDataLoaderOperator` — wczytuje instancje DICOM
 - `DICOMSeriesSelectorOperator` — wybiera właściwą serię wg reguł (np. Modality=MG)
@@ -302,9 +356,9 @@ do CV).** SDK ma gotowe *operatory*, które składasz w aplikację (graf operato
 - `DICOMSegmentationWriterOperator` — zapisuje wynik jako DICOM-SEG odwołujący się do
   serii źródłowej
 
-Twoja praca: opakować model z inżynierki w **MONAI Bundle** (wagi TorchScript +
-konfiguracja transformacji + metadane), a potem złożyć te operatory w aplikację. To
-kilkadziesiąt linijek „kleju”, ale każda linijka czegoś uczy.
+Gdy Bundle już istnieje, złożenie tych operatorów w aplikację to kilkadziesiąt linijek
+„kleju”. Aplikację pakujesz potem do kontenera **MAP** (MONAI Application Package)
+o ustalonym interfejsie wejścia i wyjścia.
 
 ```python
 # app.py — szkielet aplikacji MONAI Deploy (uzupełnij TODO)
@@ -325,23 +379,47 @@ if __name__ == "__main__":
     BreastSegApp().run()
 ```
 
-**Ścieżka B — zrób to „ręcznie” raz, dla zrozumienia.** Zanim użyjesz SDK, napisz
-minimalny wariant sam: `pydicom` do wczytania serii → złożenie wolumenu numpy →
-Twój `torch` forward → maska. Do zapisu DICOM-SEG **nie pisz enkodera od zera** (to
-pułapka na tygodnie) — użyj biblioteki **`highdicom`** (`highdicom.seg.Segmentation`),
-która robi to poprawnie i zgodnie ze standardem. Ta ścieżka boli, ale po niej naprawdę
-rozumiesz, co SDK robi za Ciebie.
-
-> Rekomendacja: zrób **B w minimalnej wersji** (dla zrozumienia), a docelowy pipeline
-> oprzyj na **A**. W README opisz, czego nauczyła Cię wersja ręczna — to pokazuje głębię.
+> **Rekomendacja:** docelowy pipeline oprzyj na **B**, model pakuj jako **Bundle**,
+> a **A** dołóż po Fazie 4 jako drugi sposób uruchomienia tego samego modelu (MAP).
+> W README porównaj oba warianty: co SDK robi za Ciebie i gdzie Cię ogranicza.
+>
+> **Dlaczego w tej kolejności.** Firmy z własnym produktem zwykle mają własny stos
+> inferencyjny: serwisy, kolejkę, Triton albo ONNX Runtime i integrację DICOM pisaną na
+> `pydicom`/`highdicom`/`pynetdicom` albo na dcm4che. MONAI Deploy spotkasz głównie na
+> platformach szpitalnych i akademickich oraz w ekosystemie NVIDII (nowsze wersje SDK
+> są oparte na NVIDIA Holoscan). W ogłoszeniach częściej pada „DICOM, PACS, DICOMweb,
+> MONAI” niż „MONAI Deploy”. Ręczna ścieżka pokazuje, że rozumiesz standard, a MAP
+> dopisany na końcu daje słowo kluczowe bez uzależniania całego projektu od SDK.
+> Zweryfikuj to sam: przejrzyj 10–15 ogłoszeń na stanowiska, na które celujesz,
+> i policz, ile wymienia MONAI Deploy, a ile DICOM i PACS.
 
 ### 3.3 Konwersja i dane testowe
 
 Jeśli Twoje dane treningowe są w NIfTI, a potrzebujesz DICOM do testów pipeline'u:
-`3D Slicer` konwertuje NIfTI→DICOM. Odwrotnie (`dcm2niix`) przyda się, gdy model chce
-NIfTI. Zrozum, że **konwersja gubi część metadanych** — to realny problem kliniczny.
+`3D Slicer` konwertuje NIfTI→DICOM, a do skryptowej konwersji wielu przypadków
+wygodniejszy jest `plastimatch` (`pyplastimatch`). Odwrotnie (`dcm2niix`) przyda się,
+gdy model chce NIfTI. Zrozum, że **konwersja gubi część metadanych** — to realny
+problem kliniczny.
+
+Zbiory publikowane w NIfTI (np. MAMA-MIA) nie niosą UID-ów ani opisu badania, więc po
+konwersji sam odpowiadasz za spójność: wszystkie fazy jednego przypadku mają dostać
+ten sam `StudyInstanceUID` i `PatientID`, każda faza własny `SeriesInstanceUID`
+i `SeriesNumber`. Inaczej PACS pokaże jedno badanie jako kilka niepowiązanych.
+
+Pamiętaj, że to scenariusz badawczy. W szpitalu kierunek jest odwrotny: DICOM
+przychodzi z aparatu, a NIfTI istnieje najwyżej jako format tymczasowy wewnątrz modelu.
 
 ### 3.4 Weryfikacja wyniku — najważniejszy moment
+
+**Zanim wepniesz model, przepuść przez eksport maskę, o której wiesz, że jest poprawna.**
+Jeśli masz ground truth (MAMA-MIA ma maski eksperckie), zrób z niej DICOM-SEG i obejrzyj
+w OHIF. Gdy nakładka jest przesunięta albo odbita, błąd siedzi w geometrii, a nie w
+modelu, i szukasz go w kilkudziesięciu linijkach zamiast w całym pipeline'ie. Dopiero
+potem podmień maskę na predykcję.
+
+Ten sam błąd złapiesz też bez viewera: wolumen złożony z serii DICOM ma się zgadzać
+z oryginalnym NIfTI co do wartości wokseli i geometrii (spacing, origin, orientacja).
+Uwaga na układ współrzędnych: NIfTI używa RAS, DICOM używa LPS. Napisz to jako test.
 
 Wygenerowany DICOM-SEG **wrzuć z powrotem do Orthanca** i otwórz w OHIF. Maska powinna
 się nałożyć **dokładnie** na właściwe przekroje właściwej serii. Jeśli jest przesunięta,
@@ -353,13 +431,16 @@ oraz Dice na jednym przypadku, dla którego masz ground truth. To pierwsze liczb
 Na razie to tylko sanity check. Ewaluację, której da się wierzyć, zrobisz w Fazie 8.
 
 > **Do przeczytania (Faza 3):**
-> - MONAI Deploy App SDK docs → tutorial „Segmentation app” i „MONAI Bundle app”
-> - `highdicom` docs → moduł `seg` (jeśli idziesz ścieżką B)
+> - `highdicom` docs → moduł `seg`
 > - MONAI Bundle spec (domyka Projekt 1 z planu)
+> - MONAI Deploy App SDK docs → tutorial „Segmentation app” i „MONAI Bundle app”
+>   (gdy dojdziesz do ścieżki A)
 
-**✅ Checkpoint Fazy 3:** wrzucasz serię do Orthanca, ręcznie odpalasz swoją aplikację,
-dostajesz DICOM-SEG, wrzucasz go do Orthanca i **widzisz poprawną nakładkę w OHIF**.
-Masz pierwsze liczby (czas, pamięć, Dice).
+**✅ Checkpoint Fazy 3:** test zgodności wolumenu z DICOM i z NIfTI przechodzi, a maska
+ekspercka wyeksportowana do SEG leży w OHIF dokładnie na zmianie. Wrzucasz serię do
+Orthanca, ręcznie odpalasz swoją aplikację, dostajesz DICOM-SEG z modelu, wrzucasz go
+do Orthanca i **widzisz poprawną nakładkę w OHIF**. Masz pierwsze liczby (czas, pamięć,
+Dice).
 
 ---
 
@@ -379,7 +460,10 @@ się sama → wynik wraca do PACS. To zamienia „skrypt” w „system”.
    (C-STORE/DICOMweb) i odpala aplikacje deploy. Najbliższe realnemu wdrożeniu.
 
 Zrób **#1 albo #2** (start), a w README opisz #3 jako „jak by to wyglądało produkcyjnie”.
-To pokazuje, że znasz drogę do dojrzałego rozwiązania.
+To pokazuje, że znasz drogę do dojrzałego rozwiązania. Jeśli projekt ma przypominać
+architekturę komercyjną, wybierz **#2**: Orthanc tylko zgłasza zdarzenie (webhook
+z pluginu albo odpytywanie `/changes`), a cała logika żyje w Twoim serwisie, który
+wdrażasz, testujesz i skalujesz niezależnie od PACS-a.
 
 ### 4.2 Kolejka, nie blokowanie
 
@@ -392,8 +476,44 @@ samego StudyInstanceUID).
 Orthanc → kolejka → worker → SEG → Orthanc → OHIF. Rysowanie tego zmusza Cię do
 zrozumienia przepływu.
 
+### 4.3 Baza zadań: stan systemu poza kolejką
+
+Kolejka wie, co jest do zrobienia, ale nie pamięta historii. Po restarcie nie odpowie
+na pytanie „co się stało z badaniem X?”. Stan każdego zadania trzymaj w Postgresie,
+a serwis z 4.1 niech będzie jego właścicielem: przyjmuje zdarzenie z Orthanca, zapisuje
+zadanie, wstawia je do kolejki i wystawia status przez API.
+
+```
+inference_job  (szkielet — typy, klucze i indeksy ustal sam)
+  id
+  study_uid, series_uids        -- referencje do Orthanca, nie kopia metadanych
+  model_version
+  status                        -- queued / running / succeeded / failed
+  attempts, error
+  created_at, started_at, finished_at
+  output_seg_uid, output_sr_uid
+```
+
+- **Nie duplikuj PACS-a.** Tabele `patient` czy `study` byłyby kopią indeksu Orthanca,
+  która się z nim rozjedzie. Twoja baza trzyma tylko to, czego DICOM nie opisuje,
+  i wskazuje na badania przez UID-y.
+- **Idempotencja w bazie, nie w pamięci workera:** ograniczenie unikalności na
+  (`study_uid`, `model_version`).
+- **Zadania trwale nieudane:** po N próbach status `failed` z zapisanym błędem,
+  widoczny na dashboardzie. Zadanie nie może po cichu zniknąć.
+- **API:** minimum to `GET /jobs/{id}`, lista zadań z filtrem po statusie i `/health`.
+
+Tu ERD ma sens jako narzędzie projektowe. Narysuj go, zanim napiszesz migracje. Dojdą
+do niego tabele z kolejnych faz: zdarzenia audytu (6.4), wyniki shadow (9.4), poprawki
+radiologa (11.2).
+
+**Zadanie 4.3.** Zabij worker w połowie inferencji. Co pokazuje baza? Czy zadanie
+zostanie podjęte ponownie i czy w Orthancu nie pojawią się dwa SEG-i? Potem wyślij to
+samo badanie drugi raz. Oba wyniki opisz w dzienniku.
+
 **✅ Checkpoint Fazy 4:** robisz `storescu` jednego badania i **bez żadnej dalszej
 akcji** po kilkunastu sekundach widzisz segmentację w OHIF. To jest moment „wow” projektu.
+API zwraca status tego zadania, a ponowne wysłanie badania nie tworzy drugiego SEG-a.
 
 ---
 
@@ -426,6 +546,15 @@ warstwa odróżnia Cię od kandydatów „tylko-ML”.
   To jest audytowalność, o którą pytają ogłoszenia.
 - Na tym etapie model może być wpieczony w obraz. W Fazie 9 go z niego wyjmiesz: obraz
   będzie wersjonował kod, a rejestr modeli (MLflow) będzie wersjonował model.
+- Worker to osobny serwis w `docker-compose.yml`. Zna tylko adres Orthanca
+  (`http://orthanc:8042` w sieci Compose), kolejkę i źródło modelu, a dane logowania
+  dostaje ze zmiennych środowiskowych. Granica kontenera pokrywa się z kontraktem
+  „seria wchodzi, SEG wychodzi”.
+- Nie dziel systemu na więcej serwisów, niż wymagają różne potrzeby: worker potrzebuje
+  GPU i skaluje się z obciążeniem, API i PACS mają działać zawsze. To uzasadnia podział.
+  Osobny mikroserwis na każdy krok pipeline'u już nie.
+- W CI postaw cały Compose i wyślij syntetyczne badanie: test przechodzi, gdy w Orthancu
+  pojawi się SEG. Pełną wersję tego testu (z geometrią) zrobisz w 9.3.
 
 ### 6.2 Obserwowalność (Grafana — masz to)
 Dashboard z metrykami, które naprawdę mają sens dla takiego systemu:
@@ -449,8 +578,38 @@ zbudujesz w Fazie 11.1 na tych samych logach.
 Dla każdego przetworzonego badania zapisz wpis: StudyUID (zhashowany, nie PHI!), wersja
 modelu, timestamp, czas inferencji, wynik. To Twoja „lineage” — słowo z ogłoszeń.
 
+Audyt to rejestr **zdarzeń**, nie tylko wyników. Zapisuj: przyjęcie badania, start
+i koniec inferencji, wysłanie SEG/SR do PACS-a, błędy i ponowienia, a także kto pobrał,
+wyeksportował albo usunął dane. Dwa wymagania odróżniają audyt od zwykłych logów:
+
+- **Tylko dopisywanie.** Odbierz roli, z której korzysta aplikacja, prawa `UPDATE`
+  i `DELETE` na tej tabeli.
+- **Bez danych pacjenta.** UID-y hashowane, żadnych nazwisk ani dat urodzenia. To samo
+  dotyczy logów aplikacji i etykiet metryk w Prometheusie.
+
+Po co to jest: RODO wymaga wykazania, kto miał dostęp do danych medycznych, a regulacje
+wyrobów medycznych (MDR, FDA) wymagają odtworzenia, która wersja oprogramowania dała
+który wynik. Gdy model okaże się wadliwy, z audytu wyciągasz listę badań, które
+przetworzył. W realnych systemach DICOM służy do tego profil **IHE ATNA** (komunikaty
+audytowe wysyłane do centralnego repozytorium). Nie wdrażaj go, ale wiedz, że istnieje.
+
+### 6.5 Bezpieczeństwo (minimum, o które zapyta każdy medtech)
+
+- **Sekrety:** `.env` lokalnie, GitHub Secrets w CI, nic w repo ani w warstwach obrazu.
+- **TLS i jeden punkt wejścia:** reverse proxy z Fazy 2 terminuje HTTPS (lokalnie
+  wystarczy certyfikat z `mkcert`). Orthanc, API i MLflow nie wystawiają portów
+  bezpośrednio na zewnątrz.
+- **Najmniejsze uprawnienia:** worker loguje się do Orthanca jako osobny użytkownik,
+  nie jako administrator.
+- **Deidentyfikacja:** dane publiczne są już zanonimizowane, ale pokaż, że znasz ten
+  krok. Orthanc ma endpoint do anonimizacji badania. Zanonimizuj jedno badanie i sprawdź
+  `dcmdump`-em, które tagi zniknęły. Zauważ, że zmieniają się też UID-y: jeśli model
+  liczy na kopii zanonimizowanej, a SEG ma wrócić do oryginalnego badania, potrzebujesz
+  mapowania UID-ów. Opisz w README, gdzie w Twojej architekturze stałby ten krok.
+
 **✅ Checkpoint Fazy 6:** dashboard w Grafanie pokazuje latencję inferencji na badanie,
-a każdy wynik ma zapisaną wersję modelu i wpis w audit logu.
+a każdy wynik ma zapisaną wersję modelu i wpis w audit logu. W repo i w logach nie ma
+haseł ani danych pacjenta, a ruch z przeglądarki idzie przez HTTPS.
 
 ---
 
@@ -609,6 +768,30 @@ mniejsza niż ten rozrzut nic nie znaczy.
 `dvc pull`, `dvc repro`. Sprawdź, czy odtworzony model ma metryki w granicach rozrzutu
 od oryginału. Zapisz wynik w dzienniku.
 
+### 7.4 Trening w kontenerze i skąd wziąć GPU
+
+Trening konteneryzuje się jako **zadanie, nie serwis**: kontener startuje, trenuje,
+zapisuje artefakty i kończy działanie. Obraz zawiera kod i zależności, a dane i wyniki
+przychodzą z zewnątrz (DVC i MLflow albo zamontowane wolumeny).
+
+```bash
+# szkielet — uzupełnij ścieżki i sekrety
+docker run --gpus all --env-file .env \
+  -v TODO:/workspace/data \
+  TWOJ-OBRAZ-TRENINGOWY dvc repro train
+```
+
+- To osobny obraz od inferencyjnego (inne zależności, inny cykl życia), ale oba
+  importują ten sam pakiet z preprocessingiem.
+- **Nie masz karty NVIDIA?** Kaggle i Colab nie uruchomią Twojego obrazu, więc odpalasz
+  tam ten sam kod i `params.yaml` z notebooka. Własny obraz uruchomisz na wynajętej
+  maszynie z GPU (RunPod, Lambda i podobne).
+- TODO: zdecyduj, jak runy z chmury trafią do Twojego MLflow (serwer dostępny z
+  zewnątrz z uwierzytelnieniem albo przeniesienie runów narzędziem
+  `mlflow-export-import`). Zapisuj w tagu runu, gdzie się liczył.
+- Zapisuj checkpoint co epokę i obsłuż wznowienie. Sesje w darmowych środowiskach są
+  zrywane, a trening 3D trwa godziny.
+
 > **Do przeczytania (Faza 7):**
 > - DVC docs → „Get Started: Data Versioning” i „Data Pipelines”
 > - MLflow docs → „Tracking” (serwer, backend store, artifact store)
@@ -698,6 +881,11 @@ Przykładowe kierunki (sprawdź aktualną dostępność i licencje, bo się zmie
   Pozwala zrobić „leave-one-source-out”: trenujesz na wszystkich źródłach poza jednym,
   a testujesz na tym jednym.
 
+> **Pułapka z MAMA-MIA.** Zbiór składa się z czterech kolekcji (DUKE, ISPY1, ISPY2,
+> NACT). Jeśli masz osobno pobraną którąś z nich z TCIA (np. Duke-Breast-Cancer-MRI),
+> to **nie jest** ona zbiorem zewnętrznym dla modelu trenowanego na całej MAMA-MIA: to
+> te same pacjentki. Zewnętrzna jest tylko kolekcja, którą wyłączyłeś z treningu.
+
 Raportuj wynik wewnętrzny i zewnętrzny obok siebie, oba z przedziałami ufności. Spadek
 jest oczekiwany i to jest wartościowy wynik, a nie porażka. Opisz, skąd się bierze:
 producent, protokół akwizycji, populacja.
@@ -742,6 +930,17 @@ nnUNetv2_train XXX 3d_fullres 0      # dla mammografii konfiguracja 2d
 
 Predykcje nnU-Neta oceniaj **swoim** kodem z 8.1, a nie jego podsumowaniem, żeby
 metryki były liczone identycznie. Loguj je do MLflow z tagiem `model_type=nnunet`.
+
+> **Gotowe wagi to nie baseline.** Autorzy MAMA-MIA udostępniają wytrenowanego nnU-Neta
+> (sprawdź w repozytorium zbioru, jakich faz oczekuje na wejściu). Przydaje się do
+> wczesnego sprawdzenia pipeline'u z Części I, bo daje sensowne maski bez czekania na
+> własny trening. Do tabeli się nie nadaje: był trenowany na przypadkach, na których
+> byś go oceniał. Do tabeli trenuj nnU-Neta sam, na swoich foldach.
+
+nnU-Net jest tu punktem odniesienia, a nie modelem, który wdrażasz. Ma własny
+preprocessing i własną predykcję, więc wpięcie go w worker oznacza osobną ścieżkę
+inferencji (seria → tymczasowy NIfTI → `nnUNetPredictor` → maska). Jeśli chcesz ją
+zrobić, potraktuj nnU-Neta jako kolejną wersję w rejestrze i przepuść przez bramkę z 9.2.
 
 Docelowa tabela w README:
 
@@ -989,6 +1188,10 @@ trtexec --onnx=model.onnx --saveEngine=model.plan --fp16 \
 Silnik TensorRT jest związany z konkretnym GPU i wersją TensorRT. W rejestrze trzymaj
 ONNX, a silnik buduj przy wdrożeniu, na docelowej maszynie.
 
+Bez karty NVIDIA zrobisz lokalnie tylko eksport do ONNX i porównanie w ONNX Runtime na
+CPU. TensorRT i Triton z GPU wymagają maszyny z kartą; wynajęta instancja na jeden
+wieczór benchmarków wystarczy. W tabeli zapisz, na jakim sprzęcie mierzyłeś.
+
 Tabela benchmarku na golden secie:
 
 | Wariant | Latencja / badanie p50 / p95 | Pamięć GPU | Dice (golden) | Δ Dice vs FP32 |
@@ -1220,6 +1423,7 @@ Kod bez opisu nie istnieje dla rekrutera. Poświęć na to realny czas.
 Przejdź dokumentację MONAI Deploy i wypisz w README: **co Twój pipeline ma, a czego
 świadomie nie zrobiłeś i dlaczego**. To pokazuje, że znasz różnicę między projektem
 edukacyjnym a wdrożeniem klinicznym — a to dojrzałość, której nie widać u juniorów.
+Jeśli zrobiłeś wariant MAP ze ścieżki A (3.2), porównaj go tu z własnym workerem.
 Zrób to samo dla MLOps: porównaj projekt z poziomami dojrzałości z lektury do Fazy 11
 i napisz, na którym jesteś i czego brakuje do następnego.
 
@@ -1255,6 +1459,26 @@ o produkcie, nie o notebooku.
 
 To rekruter obejrzy w 90 sekund i o to zapyta na rozmowie.
 
+### 12.5 Jak to nazwać w CV
+
+Nazwij projekt tym, czym jest: systemem zbudowanym według wzorców produkcyjnych na
+publicznych danych, a nie wdrożeniem klinicznym. W medtechu jedno pytanie na rozmowie
+(„w którym ośrodku to działało?”) weryfikuje zawyżony opis, a uczciwy i tak robi dobre
+wrażenie, bo mało kto z juniorów ma cokolwiek podobnego.
+
+Czego ten projekt nie symuluje i co warto znać na poziomie rozmowy: integracja z RIS
+i HIS przez HL7/FHIR, certyfikacja (MDR, FDA), praca na danych pacjentów, ruch
+z prawdziwych aparatów i wielu ośrodków naraz.
+
+Przykład wpisu (dopasuj do tego, co faktycznie zrobiłeś):
+
+> Zaprojektowałem i zbudowałem end-to-end pipeline segmentacji guzów piersi w DCE-MRI
+> zintegrowany z PACS (Orthanc, DICOMweb, OHIF): inferencja wyzwalana zdarzeniem,
+> kolejka zadań, wyniki jako DICOM-SEG i DICOM-SR, rejestr modeli z bramką jakości
+> w CI, audyt i monitoring. Dane publiczne (MAMA-MIA).
+
+Wymieniaj tylko to, co działa w repo i co umiesz pokazać na demie.
+
 **✅ Checkpoint Fazy 12:** repo ma README z oboma diagramami, GIF-ami, tabelą wyników
 z przedziałami ufności, sekcją „czego się nauczyłem” i „droga do produkcji”. Ktoś obcy
 potrafi uruchomić pipeline z README i odtworzyć wyniki przez `dvc repro`.
@@ -1280,6 +1504,9 @@ potrafi uruchomić pipeline z README i odtworzyć wyniki przez `dvc repro`.
    │  OHIF   │  ← nakładka + raport        [Prometheus / Grafana / Evidently]
    └────┬────┘
         │ poprawka radiologa (SEG, MANUAL) → Orthanc → [kolektor] → data/feedback (DVC)
+
+   [API / orkiestrator + Postgres]  ← odbiera zdarzenie z Orthanca, zapisuje zadanie,
+                                      wstawia je do kolejki; trzyma statusy i audyt (4.3, 6.4)
 ```
 
 **Cykl życia modelu (Część II):**
@@ -1323,6 +1550,16 @@ potrafi uruchomić pipeline z README i odtworzyć wyniki przez `dvc repro`.
 - **Dane szpitalne w publicznym repo** → nigdy. Publiczna wersja tylko na zbiorach
   otwartych (TCIA). To też sygnał, że rozumiesz PHI.
 - **Twarde kodowanie ścieżek/UID-ów** → wszystko przez konfigurację i metadane.
+- **Sortowanie przekrojów po `InstanceNumber` albo nazwie pliku** → wolumen odwrócony
+  lub pomieszany. Sortuj po pozycji w przestrzeni (3.1).
+- **Debugowanie geometrii na predykcji modelu** → nie wiesz, czy zawinił eksport, czy
+  model. Najpierw maska ekspercka (3.4).
+- **Stan zadań tylko w kolejce** → po restarcie nie wiesz, co się stało z badaniem.
+  Baza zadań (4.3).
+- **Hasła w `orthanc.json` albo w repo** → `.env` i zmienne środowiskowe (1.1, 6.5).
+- **Kod uruchamiany przy imporcie modułu** (pętla konwersji na poziomie pliku) →
+  odpala się przy każdym `import`. Wejście do skryptu chowaj pod
+  `if __name__ == "__main__":`.
 
 **ML i MLOps (Część II):**
 
@@ -1340,6 +1577,9 @@ potrafi uruchomić pipeline z README i odtworzyć wyniki przez `dvc repro`.
 - **`model.train()` dla MC dropout** → BatchNorm w trybie treningowym psuje predykcje.
 - **Pomiar jakości produkcyjnej na danych, które trafiły do treningu** → wynik zawyżony.
 - **Automatyczna promocja do championa** → w medycynie zawsze decyduje człowiek.
+- **Kolekcja wchodząca w skład zbioru treningowego jako „zbiór zewnętrzny”** → te same
+  pacjentki, zawyżony wynik (8.3).
+- **Gotowe wagi nnU-Neta jako baseline w tabeli** → model widział dane testowe (8.5).
 
 ---
 
