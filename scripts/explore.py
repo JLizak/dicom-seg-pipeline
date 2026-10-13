@@ -12,6 +12,6 @@ def explore():
 
     instance1 = orthanc.instance(series1["Instances"][0]) 
     
-    print(instance1)
+    print(study1)
 if __name__ == '__main__':
     explore()

@@ -4,13 +4,12 @@ from pathlib import Path
 import os
 import pydicom
 from pydicom.uid import generate_uid
+from settings import DATA_DIR
 
-PROJECT_ROOT = Path(__file__).resolve().parents[0]
+NIFTI_DIR = DATA_DIR / 'images'
+DICOM_DIR = DATA_DIR / 'images_dicom'
 
-NIFTI_DIR = PROJECT_ROOT / "data/mama-mia/raw/images"
-DICOM_DIR = PROJECT_ROOT / "data/mama-mia/dicom"
-
-def convert_case(case_dir):
+def convert_case(case_dir) -> None:
     case = case_dir.name
     destination = DICOM_DIR / case
     

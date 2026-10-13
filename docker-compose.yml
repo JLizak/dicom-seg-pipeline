@@ -14,5 +14,20 @@ services:
     volumes:
       - ./deploy/ohif/default.conf:/etc/nginx/conf.d/default.conf
       - ./deploy/ohif/app-config.js:/usr/share/nginx/html/app-config.js
+  slicer:
+    image: lassoan/slicer-notebook:latest
+    container_name: "slicer_notebook"
+    environment:
+      - JUPYTER_TOKEN=
+    ports:
+      - "8888:8888"
+      - "49053:49053"
+    volumes:
+      - ./src/dcmseg/data/images:/home/sliceruser/work_images
+      - ./src/dcmseg/data/segmentations:/home/sliceruser/work_segmentation
+
+    tty: true
+    stdin_open: true
+
 volumes:
   orthanc-db:

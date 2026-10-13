@@ -10,18 +10,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Trening i inferencja. Na laptopie instaluj torch w wersji CPU (patrz README).
 train = [
 	"torch",
 	"monai>=1.4",
 	"nibabel",
-	"einops",       # wymagane przez SwinUNETR
 	"tqdm",
+	"timm",
 ]
-# Eksport wyników jako DICOM-SEG / DICOM-SR (Faza 3 i 5).
+
 dicom = [
 	"highdicom",
 ]
+
 dev = [
 	"pytest",
 ]
